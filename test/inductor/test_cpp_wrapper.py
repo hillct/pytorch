@@ -7,6 +7,7 @@ import torch._dynamo
 from torch._inductor import config
 from torch.testing._internal.common_utils import (
     IS_MACOS,
+    slowTest,
     TEST_WITH_ASAN,
     TestCase as TorchTestCase,
 )
@@ -15,9 +16,10 @@ from torch.testing._internal.inductor_utils import HAS_CPU, HAS_CUDA
 
 try:
     try:
-        from . import test_cpu_repro, test_torchinductor
+        from . import test_cpu_repro, test_mkldnn_pattern_matcher, test_torchinductor
     except ImportError:
         import test_cpu_repro
+        import test_mkldnn_pattern_matcher
         import test_torchinductor
 except unittest.SkipTest:
     if __name__ == "__main__":
@@ -45,7 +47,7 @@ class TestCudaWrapper(TorchTestCase):
     device = "cuda"
 
 
-def make_test_case(name, device, tests):
+def make_test_case(name, device, tests, slow=False):
     test_name = f"{name}_{device}" if device else name
 
     @config.patch(cpp_wrapper=True, search_autotune_cache=False)
@@ -55,6 +57,7 @@ def make_test_case(name, device, tests):
         try:
             func = getattr(tests, test_name)
             assert callable(func), "not a callable"
+            func = slowTest(func) if slow else func
             code = test_torchinductor.run_and_get_cpp_code(func)
             self.assertEqual("load_inline" in code, True)
         finally:
@@ -63,7 +66,7 @@ def make_test_case(name, device, tests):
 
     fn.__name__ = test_name
     setattr(
-        CppWrapperTemplate if device == "cpu" else CudaWrapperTemplate, test_name, fn
+        CppWrapperTemplate if device != "cuda" else CudaWrapperTemplate, test_name, fn
     )
 
 
@@ -73,6 +76,7 @@ if RUN_CPU:
         name: str
         device: str = "cpu"
         tests: TorchTestCase = test_torchinductor.CpuTests()
+        slow: bool = False
 
     for item in [
         BaseTest("test_as_strided"),  # buffer reuse
@@ -80,6 +84,12 @@ if RUN_CPU:
         BaseTest("test_bmm1"),
         BaseTest("test_bmm2"),
         BaseTest("test_cat"),  # alias
+        BaseTest(
+            "test_conv2d_unary",
+            "",
+            test_mkldnn_pattern_matcher.TestPaternMatcher(),
+            True,
+        ),
         BaseTest("test_index_put_deterministic_fallback"),
         BaseTest("test_int_div", "", test_cpu_repro.CPUReproTests()),
         BaseTest("test_linear1"),
@@ -96,7 +106,7 @@ if RUN_CPU:
         BaseTest("test_sum_int"),  # bool, int64, int8, uint8
         BaseTest("test_transpose"),  # multiple outputs, buffer clear
     ]:
-        make_test_case(item.name, item.device, item.tests)
+        make_test_case(item.name, item.device, item.tests, item.slow)
 
     test_torchinductor.copy_tests(CppWrapperTemplate, TestCppWrapper, "cpp_wrapper")
 
